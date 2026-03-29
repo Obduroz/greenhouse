@@ -9,7 +9,7 @@
 - Электрическая схема(Собранная мною в последствии)
 - Код веб приложения(упакованого с помощью Docker мною и развернутого на yandexcloud)
 - Код микро контроллера
-Доступно тут https://drive.google.com/drive/folders/1pE9E5KHHflgpOvnxCT7y8brYBi4Hjq1_?usp=sharing
+Полные материалы доступны тут https://drive.google.com/drive/folders/1pE9E5KHHflgpOvnxCT7y8brYBi4Hjq1_?usp=sharing
 
 ## Технологии
 - HTML5, CSS3
