@@ -1,4 +1,4 @@
-# Умная Теплица - Мониторинг
+# Умная Теплица - Веб - мониторинг
 
 🌐 **Живой демо-сайт:** https://bbaukkmlitktnpqqhulp.containers.yandexcloud.net
 
