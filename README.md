@@ -14,6 +14,8 @@
 
 ## Технологии
 - HTML5, CSS3
-- Адаптивный дизайн
-- JavaScript (динамическое обновление)
-- Flask API (бекенд)
+- JavaScript
+- Flask API
+- Python
+- C++
+- Docker
