@@ -1,0 +1,387 @@
+// ПИНЫ ДЛЯ ДАТЧИКОВ
+#define LIGHT_PIN 34     // Фоторезистор
+#define DHT_PIN 4        // DHT11
+#define SOIL_PIN 35      // Датчик влажности почвы
+#define SERVO_PIN 5      // Сервопривод форточки
+#define FAN_PIN 19      // Вентилятор был 13, походу 13 ломаный
+#define PUMP_PIN 26       // Помпа (реле)
+#define HEATER_PIN 27    // Подогрев (реле)
+#define LIGHT_RELAY_PIN 18 // Подсветка (реле)
+
+// ПОРОГИ
+#define TEMP_HIGH 25     // Температура для проветривания
+#define TEMP_LOW 22      // Порог для включения подогрева
+#define SOIL_DRY 1500    // Порог сухой почвы 
+#define SOIL_WET 800     // Порог влажной почвы 
+#define LIGHT_LOW 1000   // Порог низкой освещенности
+#define LIGHT_HIGH 800   // Порог достаточной освещенности
+
+// Гистерезис для температуры
+#define TEMP_HYSTERESIS 0.2
+
+// Библиотеки
+#include <soc/rtc_cntl_reg.h>
+#include <DHT.h>
+#include <ESP32Servo.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <WiFiClientSecure.h>
+
+DHT dht(DHT_PIN, DHT11);
+Servo ventServo;
+
+// Переменные для датчиков
+int soilMoisture = 0;
+float temperature = 0;
+float humidity = 0;
+int lightLevel = 0;
+
+// Переменные состояния
+bool isVentOpen = false;
+bool isHeaterOn = false;
+bool isLightOn = false;
+bool isFanOn = false;
+bool isPumpOn = false;
+
+// Таймеры для защиты от частых переключений
+unsigned long lastVentToggle = 0;
+unsigned long lastHeaterToggle = 0;
+unsigned long lastLightToggle = 0;
+unsigned long lastPumpToggle = 0;
+const unsigned long TOGGLE_DELAY = 3000;
+
+// Переменные для WiFi
+const char* ssid = "Abc";
+const char* password = "12345678";
+const char* serverURL = "https://bbaukkmlitktnpqqhulp.containers.yandexcloud.net/api/data";
+unsigned long lastSendTime = 0;
+const unsigned long SEND_INTERVAL = 10000; // Отправлять каждые 10 секунд
+
+void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+  setCpuFrequencyMhz(80);
+  
+  Serial.begin(115200);
+  delay(2000);
+  
+  Serial.println("=== СИСТЕМА УПРАВЛЕНИЯ ТЕПЛИЦЕЙ ===");
+
+  // Выключить все в начальном состоянии
+  pinMode(FAN_PIN, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
+  pinMode(HEATER_PIN, OUTPUT);
+  pinMode(LIGHT_RELAY_PIN, OUTPUT);
+  
+  digitalWrite(FAN_PIN, LOW);
+  digitalWrite(PUMP_PIN, LOW);
+  digitalWrite(HEATER_PIN, LOW);
+  digitalWrite(LIGHT_RELAY_PIN, LOW);
+  
+  ventServo.attach(SERVO_PIN);
+  ventServo.write(0); // Форточка закрыта
+  
+  // Подключаемся к WiFi
+  connectToWiFi();
+
+  // Инициализация датчиков
+  dht.begin();
+  pinMode(SOIL_PIN, INPUT);
+  pinMode(LIGHT_PIN, INPUT);
+  
+  Serial.println("Система готова к работе");
+  Serial.println("=============================");
+}
+
+void connectToWiFi() {
+  Serial.print("Подключение к WiFi ");
+  Serial.println(ssid);
+  
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(2000);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n WiFi подключен!");
+    Serial.print("IP адрес: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n Ошибка подключения к WiFi!");
+  }
+}
+
+void loop() {
+  // Чтение данных с датчиков
+  readSensors();
+  
+  // Вывод в монитор порта
+  printSensorData();
+  
+  // Управление проветриванием
+  controlVentilation();
+  
+  // Управление поливом (помпа)
+  controlWatering();
+  
+  // Управление подогревом
+  controlHeating();
+  
+  // Управление подсветкой
+  controlLighting();
+
+  // Отправка данных на сервер
+  sendDataToServer();
+  
+  // Задержка между циклами
+  delay(2000);
+}
+
+void readSensors() {
+  // Датчик температуры и влажности воздуха
+  temperature = dht.readTemperature();
+  humidity = dht.readHumidity();
+  
+  if (isnan(temperature) || isnan(humidity)) {
+    Serial.println("Ошибка чтения DHT!");
+    temperature = -99;
+    humidity = -99;
+  }
+  
+  // Датчик влажности почвы
+  soilMoisture = analogRead(SOIL_PIN);
+  
+  // Датчик освещенности
+  lightLevel = analogRead(LIGHT_PIN);
+}
+
+void printSensorData() {
+  Serial.println("\n--- ДАННЫЕ С ДАТЧИКОВ ---");
+  
+  // Температура и влажность
+  if (temperature != -99) {
+    Serial.print("Температура: ");
+    Serial.print(temperature, 1);
+    Serial.print("°C  |  Влажность: ");
+    Serial.print(humidity, 1);
+    Serial.println("%");
+    
+    if (temperature > TEMP_HIGH) {
+      Serial.println(" Высокая температура!");
+    }
+    
+    if (temperature < TEMP_LOW) {
+      Serial.println(" Низкая температура!");
+    }
+  }
+  
+  // Влажность почвы
+  Serial.print("Влажность почвы: ");
+  Serial.print(soilMoisture);
+  Serial.print(" (");
+  
+  if (soilMoisture > SOIL_DRY) {
+    Serial.print("СУХО");
+  } else if (soilMoisture > SOIL_WET) {
+    Serial.print("НОРМА");
+  } else {
+    Serial.print("МОКРО");
+  }
+  Serial.println(")");
+  
+  // Освещенность
+  Serial.print("Освещенность: ");
+  Serial.print(lightLevel);
+  Serial.print(" (");
+  
+  if (lightLevel < LIGHT_HIGH) {
+    Serial.print("ЯРКО");
+  } else if (lightLevel < LIGHT_LOW) {
+    Serial.print("НОРМА");
+  } else {
+    Serial.print("ТЕМНО");
+  }
+  Serial.println(")");
+  
+  // Статусы устройств
+  //Serial.println("--- СОСТОЯНИЕ УСТРОЙСТВ ---");
+  //Serial.print("Форточка: ");
+  //Serial.println(isVentOpen ? "ОТКРЫТА" : "ЗАКРЫТА");
+  //Serial.print("Вентилятор: ");
+  //Serial.println(isFanOn ? "ВКЛ" : "ВЫКЛ");
+  //Serial.print("Подогрев: ");
+  //Serial.println(isHeaterOn ? "ВКЛ" : "ВЫКЛ");
+  //Serial.print("Подсветка: ");
+  //Serial.println(isLightOn ? "ВКЛ" : "ВЫКЛ");
+  //Serial.print("Помпа: ");
+  //Serial.println(isPumpOn ? "ВКЛ" : "ВЫКЛ");
+  //Serial.println("------------------------");
+}
+
+void controlVentilation() {
+  unsigned long currentTime = millis();
+  
+  // Проверяем защиту от частых переключений
+  if (currentTime - lastVentToggle < TOGGLE_DELAY) {
+    return;
+  }
+  
+  // Если температура выше порога И форточка закрыта
+  if (temperature > TEMP_HIGH && !isVentOpen) {
+    Serial.println(" Открываю форточку и включаю вентилятор");
+    ventServo.write(90); // Открыть форточку
+    digitalWrite(FAN_PIN, HIGH);
+    isVentOpen = true;
+    isFanOn = true;
+    lastVentToggle = currentTime;
+  }
+  // Если температура нормализовалась И форточка открыта
+  else if (temperature <= (TEMP_HIGH - TEMP_HYSTERESIS) && isVentOpen) {
+    Serial.println(" Температура нормализовалась, закрываю проветривание");
+    ventServo.write(0); // Закрыть форточку
+    digitalWrite(FAN_PIN, LOW);
+    isVentOpen = false;
+    isFanOn = false;
+    lastVentToggle = currentTime;
+  }
+}
+
+void controlWatering() {
+  unsigned long currentTime = millis();
+  
+  // Проверяем защиту от частых переключений
+  if (currentTime - lastPumpToggle < TOGGLE_DELAY) {
+    return;
+  }
+  
+  // Если почва сухая И помпа выключена
+  if (soilMoisture > SOIL_DRY && !isPumpOn) {
+    Serial.println(" Почва сухая - включаю полив");
+    digitalWrite(PUMP_PIN, HIGH);
+    isPumpOn = true;
+    lastPumpToggle = currentTime;
+  }
+  // Если почва достаточно влажная И помпа включена
+  else if (soilMoisture <= SOIL_WET && isPumpOn) {
+    Serial.println(" Почва достаточно влажная - выключаю полив");
+    digitalWrite(PUMP_PIN, LOW);
+    isPumpOn = false;
+    lastPumpToggle = currentTime;
+  }
+  
+  // Защита от бесконечного полива
+  if (isPumpOn && (currentTime - lastPumpToggle > 300000)) { // 5 минут
+    Serial.println(" Аварийное отключение помпы (превышено время работы)");
+    digitalWrite(PUMP_PIN, LOW);
+    isPumpOn = false;
+    lastPumpToggle = currentTime;
+  }
+}
+
+void controlHeating() {
+  unsigned long currentTime = millis();
+  
+  // Проверяем защиту от частых переключений
+  if (currentTime - lastHeaterToggle < TOGGLE_DELAY) {
+    return;
+  }
+  
+  // Если температура ниже порога И подогрев выключен
+  if (temperature < TEMP_LOW && !isHeaterOn) {
+    Serial.println(" Температура ниже " + String(TEMP_LOW) + "°C");
+    Serial.println(" Включаю подогрев");
+    digitalWrite(HEATER_PIN, HIGH);
+    isHeaterOn = true;
+    lastHeaterToggle = currentTime;
+  }
+  // Если температура поднялась выше порога+гистерезис И подогрев включен
+  else if (temperature > (TEMP_LOW + TEMP_HYSTERESIS) && isHeaterOn) {
+    Serial.println(" Температура нормализовалась, выключаю подогрев");
+    digitalWrite(HEATER_PIN, LOW);
+    isHeaterOn = false;
+    lastHeaterToggle = currentTime;
+  }
+}
+
+void controlLighting() {
+  unsigned long currentTime = millis();
+  
+  // Проверяем защиту от частых переключений
+  if (currentTime - lastLightToggle < TOGGLE_DELAY) {
+    return;
+  }
+  
+  // Если темно И подсветка выключена
+  if (lightLevel > LIGHT_LOW && !isLightOn) {
+    Serial.println(" Темно - включаю подсветку");
+    digitalWrite(LIGHT_RELAY_PIN, HIGH);
+    isLightOn = true;
+    lastLightToggle = currentTime;
+  }
+  // Если стало светло И подсветка включена
+  else if (lightLevel <= LIGHT_HIGH && isLightOn) {
+    Serial.println(" Стало светло - выключаю подсветку");
+    digitalWrite(LIGHT_RELAY_PIN, LOW);
+    isLightOn = false;
+    lastLightToggle = currentTime;
+  }
+}
+
+void sendDataToServer() {
+  // Проверяем интервал отправки
+  if (millis() - lastSendTime < SEND_INTERVAL && lastSendTime != 0) {
+    return;
+  }
+  
+  // Проверяем подключение к WiFi
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ WiFi не подключен. Переподключение...");
+    connectToWiFi();
+    return;
+  }
+  
+  // Создаем JSON объект с данными датчиков и состояниями устройств
+  DynamicJsonDocument doc(1024);
+  
+  doc["temperature"] = temperature;
+  doc["humidity"] = humidity;
+  doc["soil_moisture"] = soilMoisture;
+  doc["light_level"] = lightLevel;
+  doc["timestamp"] = millis() / 1000;
+  
+  // Добавляем состояния устройств
+  doc["devices"]["vent"] = isVentOpen;
+  doc["devices"]["fan"] = isFanOn;
+  doc["devices"]["heater"] = isHeaterOn;
+  doc["devices"]["light"] = isLightOn;
+  doc["devices"]["pump"] = isPumpOn;
+  
+  // Конвертируем в строку
+  String jsonString;
+  serializeJson(doc, jsonString);
+  
+  Serial.println(" Отправка данных на сервер...");
+  Serial.println(jsonString);
+  
+  WiFiClientSecure client;
+  client.setInsecure(); // Отключаем проверку сертификата (для простоты)
+  
+  HTTPClient http;
+  http.begin(client, serverURL);
+  http.addHeader("Content-Type", "application/json");
+  
+  int httpCode = http.POST(jsonString);
+  
+  if (httpCode > 0) {
+    Serial.printf(" Данные отправлены. Код ответа: %d\n", httpCode);
+  } else {
+    Serial.printf(" Ошибка отправки: %s\n", http.errorToString(httpCode).c_str());
+  }
+  
+  http.end();
+  lastSendTime = millis();
+}
